@@ -70,13 +70,32 @@ async function api(path, body) {
   if (!r.ok) throw new Error(j.error || "エラー");
   return j;
 }
+let lastSig = null;
+let entryShown = false;
+function updateTimer() {
+  const el = document.getElementById("timerEl");
+  if (el && state?.phaseEndsAt) {
+    const s = Math.max(0, Math.round((state.phaseEndsAt - Date.now()) / 1000));
+    el.textContent = `残り ${s} 秒`;
+  }
+}
+setInterval(updateTimer, 500);
 async function poll() {
-  if (!session) return renderEntry();
+  if (!session) { if (!entryShown) { entryShown = true; renderEntry(); } return; }
   try {
     const r = await fetch(`/api/state?room=${session.code}&player=${session.playerId}&token=${session.token}`);
-    if (!r.ok) { session = null; localStorage.removeItem("baka_session"); return renderEntry(); }
-    state = await r.json();
-    if (state.phase !== lastPhase) { lastPhase = state.phase; sel = { mode: "work", targetId: null, predictRole: "ねずみ", bomberMode: "plant", voteTarget: undefined }; }
+    if (!r.ok) { session = null; localStorage.removeItem("baka_session"); state = null; entryShown = true; renderEntry(); return; }
+    const st = await r.json();
+    state = st;
+    updateTimer();
+    const { phaseEndsAt, ...rest } = st;
+    const sig = JSON.stringify(rest);
+    if (sig === lastSig) return; // 変化がなければ再描画しない
+    const ae = document.activeElement;
+    const interacting = ae && ["INPUT", "TEXTAREA", "SELECT"].includes(ae.tagName);
+    if (interacting && st.phase === lastPhase) return; // 入力中は再描画しない（キーボードが勝手に閉じるのを防ぐ）
+    lastSig = sig;
+    if (st.phase !== lastPhase) { lastPhase = st.phase; sel = { mode: "work", targetId: null, predictRole: "ねずみ", bomberMode: "plant", voteTarget: undefined }; }
     render();
   } catch { /* 次のポーリングで再試行 */ }
 }
@@ -132,7 +151,7 @@ async function joinRoom() {
 function timerText() {
   if (!state.phaseEndsAt) return "";
   const s = Math.max(0, Math.round((state.phaseEndsAt - Date.now()) / 1000));
-  return `<div class="timer">残り ${s} 秒</div>`;
+  return `<div class="timer" id="timerEl">残り ${s} 秒</div>`;
 }
 function playerList(showActed = false) {
   return state.players.map((p) => `
@@ -287,7 +306,7 @@ async function addBot() { await api("/api/addbot", { ...session }); poll(); }
 async function startGame() { try { await api("/api/start", { ...session }); poll(); } catch (e) { alert(e.message); } }
 async function rematch() { await api("/api/rematch", { ...session }); poll(); }
 
-if (session) poll(); else renderEntry();
+if (session) poll(); else { entryShown = true; renderEntry(); }
 </script>
 </body>
 </html>
