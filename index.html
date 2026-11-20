@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>バカ人狼</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: sans-serif; background: #17141f; color: #eee; }
+  .wrap { max-width: 560px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 24px; margin: 8px 0; }
+  h2 { font-size: 18px; margin: 16px 0 8px; }
+  input, select, button { font-size: 16px; padding: 10px; border-radius: 8px; border: 1px solid #554; }
+  input, select { background: #241f33; color: #eee; width: 100%; }
+  button { background: #6c4fd8; color: #fff; border: none; cursor: pointer; width: 100%; margin-top: 8px; }
+  button.sub { background: #3a3450; }
+  button:disabled { opacity: .45; }
+  .card { background: #241f33; border-radius: 12px; padding: 12px; margin: 10px 0; }
+  .role { border: 2px solid #6c4fd8; }
+  .innocent { color: #7dd87d; } .impostor { color: #ff7d7d; } .neutral { color: #ffd97d; }
+  .player { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #3a3450; }
+  .dead { opacity: .5; text-decoration: line-through; }
+  .targets button { margin-top: 6px; background: #3a3450; text-align: left; }
+  .targets button.sel { background: #6c4fd8; }
+  .log { font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
+  .priv { color: #ffd97d; }
+  .code { font-size: 36px; letter-spacing: 6px; text-align: center; font-weight: bold; }
+  .timer { text-align: right; color: #bbb; font-size: 14px; }
+  .err { color: #ff7d7d; }
+  details { margin: 8px 0; } summary { cursor: pointer; }
+  .small { font-size: 13px; color: #bbb; }
+  .win { border: 2px solid #ffd97d; }
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+const ROLE_INFO = {
+  "ドクター": "訪問した相手がその夜に死んだ場合、蘇生させる。訪問したことは相手に伝わる。同じ相手に2夜連続では行けない。",
+  "ブレイマー": "訪問した相手の役職が、調査でインポスターに見えるようになる。2回まで。",
+  "クリーナー": "指定した相手が死ぬ／追放されると、公開される役職が「わからない」になる。調査も妨害する。訪問は相手にバレない。",
+  "ねずみ": "訪問した相手の役職と陣営を正確に知る。1回だけ。使ったことは翌朝、全員に公表される。",
+  "ポリス": "訪問した相手の外出を封じて、能力を使えなくする。相手には姿が見える。出ようとしたかどうかが分かる。同じ相手に2夜連続では行けない。",
+  "トラッパー": "訪問した相手の家に罠をしかける。その家を訪れた1人（ランダム）が罠にかかり、能力が不発になる。シリアルキラーはかからない。",
+  "ルックアウト": "指定した相手の家を、誰が訪れたかを知る。罠にかかった人とシリアルキラーは見えない。",
+  "インベスティゲーター": "訪問した相手の役職と陣営を2択まで絞り込む。片方は正解、もう片方はハズレ。",
+  "挑発者": "訪問した相手は、翌日の投票で最初から2票入った状態になる。2回まで。インポスターと共に生き残り、最後の夜にインポスターを挑発していたら単独勝利。",
+  "トラッカー": "指定した相手の家の前にペンキを塗る。その人が夜に外出したら、行き先の家が分かる。シリアルキラーには効かない。",
+  "シリアルキラー": "毎夜1人を殺せる。ポリスや罠の妨害を受けない。殺した相手の役職は公開されない。全員を殺せば勝利。",
+  "ボマー": "相手の家に爆弾を仕掛ける。別の夜に、仕掛けた爆弾をまとめて起爆できる。全員を殺せば勝利。",
+  "サバイバー": "夜に殺されても3回まで復活する。ゲーム終了まで生き残れば勝利。",
+  "シーフ": "殺した相手の役職を盗む。勝利条件も盗んだ役職のものになる。",
+  "魔術師": "家から出ずに相手の役職を予測する。当たれば相手は死ぬ（蘇生不可）。外せば自分が死ぬ。夜の攻撃では死なない。",
+  "ゴースト": "相手の家にろうそくを置く。投票で追放されたら、次の夜にろうそくの相手を道連れにする。それが勝利条件。",
+};
+const ALL_ROLES = Object.keys(ROLE_INFO);
+
+let session = JSON.parse(localStorage.getItem("baka_session") || "null");
+let state = null;
+let sel = { mode: "work", targetId: null, predictRole: "ねずみ", bomberMode: "plant", voteTarget: undefined };
+let lastPhase = null;
+
+const $ = (html) => { document.getElementById("app").innerHTML = html; };
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function api(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || "エラー");
+  return j;
+}
+async function poll() {
+  if (!session) return renderEntry();
+  try {
+    const r = await fetch(`/api/state?room=${session.code}&player=${session.playerId}&token=${session.token}`);
+    if (!r.ok) { session = null; localStorage.removeItem("baka_session"); return renderEntry(); }
+    state = await r.json();
+    if (state.phase !== lastPhase) { lastPhase = state.phase; sel = { mode: "work", targetId: null, predictRole: "ねずみ", bomberMode: "plant", voteTarget: undefined }; }
+    render();
+  } catch { /* 次のポーリングで再試行 */ }
+}
+setInterval(poll, 1000);
+
+function renderEntry(msg = "") {
+  $(`
+    <h1>バカ人狼</h1>
+    <p class="small">全員に役職が配られる人狼。ただし1人だけ、役職だと思い込んでいる「バカ」が混ざっている。本人は気づかない。</p>
+    ${msg ? `<p class="err">${esc(msg)}</p>` : ""}
+    <div class="card">
+      <label>名前</label>
+      <input id="name" placeholder="名前" value="${esc(localStorage.getItem("baka_name") || "")}">
+      <button onclick="createRoom()">ルームを作る</button>
+    </div>
+    <div class="card">
+      <label>ルームコードで参加</label>
+      <input id="code" placeholder="コード（4文字）" style="text-transform:uppercase">
+      <button class="sub" onclick="joinRoom()">参加する</button>
+    </div>
+    ${rolesHelp()}
+  `);
+}
+function rolesHelp() {
+  return `<details><summary>役職一覧とルール</summary><div class="small">
+    <p>陣営は3つ：<span class="innocent">イノセント</span>（インポスターと危険なニュートラルを全て追放で勝利）／
+    <span class="impostor">インポスター</span>（イノセントと同数で勝利。夜は「襲撃」か「役職の仕事」を選べる）／
+    <span class="neutral">ニュートラル</span>（役職ごとに勝利条件が違う）。</p>
+    <p>同じ役職でも陣営が違うことがある。「バカ」はイノセントの役職だと思い込んでいる無能力者で、本人には最後まで分からない。</p>
+    ${ALL_ROLES.map((r) => `<p><b>${r}</b>： ${ROLE_INFO[r]}</p>`).join("")}
+  </div></details>`;
+}
+async function createRoom() {
+  const name = document.getElementById("name").value.trim() || "名無し";
+  localStorage.setItem("baka_name", name);
+  try {
+    session = await api("/api/create", { name });
+    localStorage.setItem("baka_session", JSON.stringify(session));
+    poll();
+  } catch (e) { renderEntry(e.message); }
+}
+async function joinRoom() {
+  const name = document.getElementById("name").value.trim() || "名無し";
+  const code = document.getElementById("code").value.trim().toUpperCase();
+  localStorage.setItem("baka_name", name);
+  try {
+    session = await api("/api/join", { name, code });
+    localStorage.setItem("baka_session", JSON.stringify(session));
+    poll();
+  } catch (e) { renderEntry(e.message); }
+}
+
+function timerText() {
+  if (!state.phaseEndsAt) return "";
+  const s = Math.max(0, Math.round((state.phaseEndsAt - Date.now()) / 1000));
+  return `<div class="timer">残り ${s} 秒</div>`;
+}
+function playerList(showActed = false) {
+  return state.players.map((p) => `
+    <div class="player ${p.alive ? "" : "dead"}">
+      <span>${esc(p.name)}${p.isMe ? "（あなた）" : ""}${p.isBot ? " 🤖" : ""}</span>
+      <span>${p.alive ? (showActed && p.acted !== null ? (p.acted ? "✓" : "…") : "") : (p.publicReveal ? esc(p.publicReveal.text) : "死亡")}</span>
+    </div>`).join("");
+}
+function myRoleCard() {
+  const m = state.me;
+  if (!m) return "";
+  const fclass = m.faction === "innocent" ? "innocent" : m.faction === "impostor" ? "impostor" : "neutral";
+  return `<div class="card role">
+    <div>あなたの役職： <b>${esc(m.roleLabel)}</b> ／ <span class="${fclass}">${esc(m.factionLabel)}</span></div>
+    <div class="small">${esc(ROLE_INFO[m.roleLabel] || "")}</div>
+    ${m.usesLeft !== null && m.usesLeft !== undefined ? `<div class="small">残り使用回数： ${m.usesLeft}</div>` : ""}
+    ${m.survivorCharges !== null && m.survivorCharges !== undefined ? `<div class="small">復活回数： ${m.survivorCharges}</div>` : ""}
+    ${m.bombsPlanted ? `<div class="small">仕掛けた爆弾： ${m.bombsPlanted} 個</div>` : ""}
+    ${m.teammates?.length ? `<div class="small">仲間のインポスター： ${m.teammates.map((t) => `${esc(t.name)}（${esc(t.roleLabel)}）`).join("、")}</div>` : ""}
+    ${!m.alive ? `<div class="err">あなたは死んでいます。観戦中…</div>` : ""}
+  </div>`;
+}
+function logs() {
+  const pub = state.publicLog.slice(-8).map((l) => `<div>${esc(l)}</div>`).join("");
+  const priv = (state.me?.privateLog ?? []).slice(-6).map((l) => `<div class="priv">${esc(l)}</div>`).join("");
+  return `<div class="card log"><h2 style="margin-top:0">経過</h2>${pub}${priv}</div>`;
+}
+
+function render() {
+  if (!state) return;
+  const phase = state.phase;
+  if (phase === "lobby") {
+    $(`
+      <h1>バカ人狼</h1>
+      <div class="card"><div class="small" style="text-align:center">ルームコード</div><div class="code">${esc(state.code)}</div></div>
+      <div class="card"><h2 style="margin-top:0">参加者（${state.players.length}/12）</h2>${playerList()}
+      ${state.isHost ? `<button class="sub" onclick="addBot()">ボットを追加</button>
+      <button onclick="startGame()" ${state.players.length < 4 ? "disabled" : ""}>ゲーム開始（4人以上）</button>` : `<p class="small">ホストの開始を待っています…</p>`}
+      </div>
+      ${rolesHelp()}
+    `);
+    return;
+  }
+  if (phase === "finished") {
+    const f = state.finished;
+    const winners = f.reveal.filter((r) => r.won).map((r) => esc(r.name)).join("、");
+    $(`
+      <h1>ゲーム終了</h1>
+      <div class="card ${f.iWon ? "win" : ""}"><b>${f.iWon ? "あなたの勝ち！" : "あなたの負け"}</b><br>
+      <span class="small">${esc(f.endReason ?? "")}</span><br>勝者： ${winners || "なし"}</div>
+      <div class="card"><h2 style="margin-top:0">全員の正体</h2>
+      ${f.reveal.map((r) => `<div class="player ${r.alive ? "" : "dead"}"><span>${esc(r.name)}</span><span>${esc(r.trueRole)}／${esc(r.factionLabel)}${r.won ? " 🏆" : ""}</span></div>`).join("")}
+      </div>
+      ${logs()}
+      ${state.isHost ? `<button onclick="rematch()">ロビーに戻って再戦</button>` : `<p class="small">ホストが再戦を用意しています…</p>`}
+    `);
+    return;
+  }
+  const phaseTitle = { night: `🌙 ${state.day}日目の夜`, morning: `☀️ ${state.day}日目の朝`, discussion: `🗣 ${state.day}日目の議論`, voting: `🗳 ${state.day}日目の投票`, exile: `結果` }[phase] || phase;
+  let body = `<h1>${phaseTitle}</h1>${timerText()}${myRoleCard()}`;
+
+  if (phase === "night") {
+    body += state.me.alive ? nightForm() : `<div class="card">夜が明けるのを待っています…</div>`;
+  } else if (phase === "morning") {
+    body += `<div class="card">朝になりました。結果を確認してください。</div>`;
+  } else if (phase === "discussion") {
+    body += `<div class="card"><h2 style="margin-top:0">参加者</h2>${playerList()}
+    ${state.me.alive && !state.me.iAmReady ? `<button onclick="ready()">議論を終えて投票へ</button>` : `<p class="small">全員の準備ができたら投票に進みます。</p>`}</div>`;
+  } else if (phase === "voting") {
+    body += state.me.alive ? voteForm() : `<div class="card">投票を見守っています…</div>`;
+    body += `<div class="card"><h2 style="margin-top:0">投票状況</h2>${playerList(true)}</div>`;
+  } else if (phase === "exile") {
+    const ex = state.lastExile;
+    body += `<div class="card">${ex?.exiledId ? "追放が決まりました。経過ログを見てください。" : "誰も追放されませんでした。"}</div>`;
+  }
+  body += logs();
+  $(body);
+}
+
+function nightForm() {
+  const spec = state.nightSpec;
+  if (!spec) return "";
+  if (state.me.myActionDone) return `<div class="card">行動を送信しました。変更もできます。<br><button class="sub" onclick="resetSel()">選び直す</button></div>` + nightFormInner(spec);
+  return nightFormInner(spec);
+}
+function nightFormInner(spec) {
+  let h = `<div class="card"><h2 style="margin-top:0">夜の行動</h2>`;
+  if (spec.isImpostor) {
+    h += `<label><input type="radio" name="mode" ${sel.mode === "work" ? "checked" : ""} onchange="sel.mode='work';render()"> 役職の仕事をする</label><br>
+          <label><input type="radio" name="mode" ${sel.mode === "kill" ? "checked" : ""} onchange="sel.mode='kill';render()"> 襲撃する</label>`;
+  }
+  const mode = spec.isImpostor ? sel.mode : "work";
+  if (mode === "kill") {
+    h += targetButtons("others");
+  } else if (spec.kind === "bomber") {
+    h += `<label><input type="radio" name="bmode" ${sel.bomberMode === "plant" ? "checked" : ""} onchange="sel.bomberMode='plant';render()"> 爆弾を仕掛ける</label><br>
+          <label><input type="radio" name="bmode" ${sel.bomberMode === "detonate" ? "checked" : ""} onchange="sel.bomberMode='detonate';render()" ${spec.bombsPlanted ? "" : "disabled"}> 起爆する（${spec.bombsPlanted}個）</label>`;
+    if (sel.bomberMode === "plant") h += targetButtons("others");
+  } else if (spec.kind) {
+    h += targetButtons(spec.targetScope);
+    if (spec.extra === "predictRole") {
+      h += `<div style="margin-top:8px"><label>役職の予測</label><select id="predict">
+        ${ALL_ROLES.map((r) => `<option ${r === sel.predictRole ? "selected" : ""}>${r}</option>`).join("")}
+        <option value="baka" ${sel.predictRole === "baka" ? "selected" : ""}>バカ</option></select></div>`;
+    }
+  } else {
+    h += `<p class="small">今夜できる行動はありません（家で過ごします）。</p>`;
+  }
+  h += `<button onclick="submitAction()">決定</button>
+        <button class="sub" onclick="submitStay()">今夜は何もしない</button></div>`;
+  return h;
+}
+function targetButtons(scope) {
+  const list = (state.targets || []).filter((t) => scope === "any" || !t.isMe);
+  if (!list.length) return `<p class="small">対象がいません。</p>`;
+  return `<div class="targets">${list.map((t) => `<button class="${sel.targetId === t.id ? "sel" : ""}" onclick="sel.targetId='${t.id}';render()">${esc(t.name)}</button>`).join("")}</div>`;
+}
+async function submitAction() {
+  const spec = state.nightSpec;
+  const action = {};
+  if (spec.isImpostor && sel.mode === "kill") {
+    if (!sel.targetId) return alert("襲撃の相手を選んでください");
+    action.mode = "kill"; action.targetId = sel.targetId;
+  } else if (spec.kind === "bomber" && sel.bomberMode === "detonate") {
+    action.bomberMode = "detonate";
+  } else if (spec.kind) {
+    if (!sel.targetId) return alert("相手を選んでください");
+    action.targetId = sel.targetId;
+    if (spec.extra === "predictRole") action.predictRole = roleIdOf(document.getElementById("predict").value);
+  }
+  await api("/api/action", { ...session, action });
+  poll();
+}
+function roleIdOf(label) {
+  const map = { "ドクター": "doctor", "ブレイマー": "blamer", "クリーナー": "cleaner", "ねずみ": "mouse", "ポリス": "police", "トラッパー": "trapper", "ルックアウト": "lookout", "インベスティゲーター": "investigator", "挑発者": "provoker", "トラッカー": "tracker", "シリアルキラー": "serial_killer", "ボマー": "bomber", "サバイバー": "survivor", "シーフ": "thief", "魔術師": "magician", "ゴースト": "ghost", "バカ": "baka" };
+  return map[label] || label;
+}
+async function submitStay() { await api("/api/action", { ...session, action: { stay: true } }); poll(); }
+function resetSel() { sel.targetId = null; state.me.myActionDone = false; render(); }
+
+function voteForm() {
+  if (state.me.myVoteDone) return `<div class="card">投票しました。</div>`;
+  const list = state.targets || [];
+  return `<div class="card"><h2 style="margin-top:0">追放する人を選ぶ</h2>
+    <div class="targets">${list.map((t) => `<button class="${sel.voteTarget === t.id ? "sel" : ""}" onclick="sel.voteTarget='${t.id}';render()">${esc(t.name)}</button>`).join("")}
+    <button class="${sel.voteTarget === null ? "sel" : ""}" onclick="sel.voteTarget=null;render()">棄権</button></div>
+    <button onclick="submitVote()">投票する</button></div>`;
+}
+async function submitVote() { await api("/api/vote", { ...session, targetId: sel.voteTarget ?? null }); poll(); }
+async function ready() { await api("/api/ready", { ...session }); poll(); }
+async function addBot() { await api("/api/addbot", { ...session }); poll(); }
+async function startGame() { try { await api("/api/start", { ...session }); poll(); } catch (e) { alert(e.message); } }
+async function rematch() { await api("/api/rematch", { ...session }); poll(); }
+
+if (session) poll(); else renderEntry();
+</script>
+</body>
+</html>
