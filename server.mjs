@@ -15,7 +15,7 @@ const __dir = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 const NIGHT_MS = Number(process.env.NIGHT_MS || 75_000);
 const MORNING_MS = Number(process.env.MORNING_MS || 12_000);
-const DISCUSS_MS = Number(process.env.DISCUSS_MS || 120_000);
+const DISCUSS_MS = Number(process.env.DISCUSS_MS || 0); // 0 = 討論は無制限（全員の準備完了で進行）
 const VOTE_MS = Number(process.env.VOTE_MS || 60_000);
 const EXILE_MS = Number(process.env.EXILE_MS || 8_000);
 
@@ -118,7 +118,7 @@ function advance(room) {
       setPhase(room, "morning", MORNING_MS);
     }
   } else if (room.phase === "morning") {
-    if (timedOut) setPhase(room, "discussion", DISCUSS_MS);
+    if (timedOut) setPhase(room, "discussion", DISCUSS_MS || null);
   } else if (room.phase === "discussion") {
     const alive = alivePlayers(g);
     if (alive.every((p) => room.ready.has(p.id)) || timedOut) setPhase(room, "voting", VOTE_MS);
@@ -159,7 +159,7 @@ function stateFor(room, me) {
         acted: g ? (room.phase === "night" ? g.actions.has(p.id) : room.phase === "voting" ? g.votes.has(p.id) : null) : null,
       };
     }),
-    publicLog: g ? g.publicLog : [],
+    publicLog: g ? g.publicLog.slice(-30) : [], // 軽量化: 直近分だけ送る
     day: g ? g.day : 0,
     lastExile: room.lastExile,
   };
@@ -174,7 +174,7 @@ function stateFor(room, me) {
     survivorCharges: meG.role === "survivor" || meG.displayRole === "survivor" ? meG.survivorCharges : null,
     bombsPlanted: meG.bombs.length,
     teammates: impostorTeammates(g, meG),
-    privateLog: meG.privateLog,
+    privateLog: meG.privateLog.slice(-30),
     myActionDone: g.actions.has(me.id),
     myVoteDone: g.votes.has(me.id),
     iAmReady: room.ready.has(me.id),
